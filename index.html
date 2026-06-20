@@ -2587,15 +2587,18 @@ async function _gasGet(params) {
       renderChecklist();
       renderChecklistList();
       showToast('📂 Tersimpan lokal. Mengarsip ke Drive…', 'success');
-      _uplFile      = null;
       btn.disabled  = false;
       btn.innerHTML = '<i class="ti ti-upload"></i> Upload';
-
+      
       // — Kirim ke GAS (async, tidak blocking UI) —
       if (_uplFile.size > MAX_UPLOAD_BYTES_CLIENT) {
+        _uplFile = null;   // ← pindahkan ke sini
         showToast('📂 Tersimpan lokal saja (file melebihi batas arsip Drive).', 'warn');
         return;
       }
+      
+      // Simpan ukuran dulu sebelum di-null
+      _uplFile = null;   // ← dan di sini (setelah cek)
       const r = await _gasPost({
         action     : 'uploadFile',
         opdId,
