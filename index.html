@@ -409,8 +409,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <h2>NATAS-RKA</h2>
     <div class="tagline">Sistem Informasi Pra Reviu Kelengkapan Dokumen RKA<br>Inspektorat Daerah Kab. Manggarai Barat</div>
     <div class="login-divider"></div>
-    <div class="input-field"><i class="ti ti-user"></i><input type="text" id="loginUser" placeholder="Username" autocomplete="username" value="admin"></div>
-    <div class="input-field"><i class="ti ti-lock"></i><input type="password" id="loginPass" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter') doLogin()" value="natas2025"></div>
+    <div class="input-field"><i class="ti ti-user"></i><input type="text" id="loginUser" placeholder="Username" autocomplete="off"></div>
+    <div class="input-field"><i class="ti ti-lock"></i><input type="password" id="loginPass" placeholder="Password" autocomplete="new-password" onkeydown="if(event.key==='Enter') doLogin()"></div>
     <button class="btn-login" onclick="doLogin()"><i class="ti ti-login"></i> Masuk ke Dashboard</button>
     <div id="loginError" class="login-error"><i class="ti ti-alert-circle" style="margin-right:6px"></i>Username atau password salah!</div>
     <div class="login-footer"><small>Hanya untuk Tim Reviu Inspektorat Daerah</small></div>
@@ -1034,17 +1034,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 const STORE_KEY = 'natas_rka_v4';
 let S = load();
 
-function load(){
-  try{ const d = localStorage.getItem(STORE_KEY); if(d){
-    const p = JSON.parse(d);
-    // Migrasi data lama: jika masih pakai dokWajib tunggal, pindahkan ke kedua jenis
-    if(p.dokWajib && !p.dokWajibMurni){
-      p.dokWajibMurni = [...p.dokWajib];
-      p.dokWajibPerubahan = [...p.dokWajib];
-      delete p.dokWajib;
-    }
-    return p;
-  }}catch(e){}
+function _defaultState(){
   return {
     opd: [],
     dokWajibMurni: ['Surat Permohonan Reviu','RKA OPD','Renja OPD','KUA-PPAS','Dokumen Mandatory Spending','Dokumen Pendukung Lainnya'],
@@ -1055,7 +1045,86 @@ function load(){
     activity: []
   };
 }
-function save(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }catch(e){ showToast('Penyimpanan penuh! Hapus beberapa dokumen.','err'); } }
+
+function load(){
+  try{
+    const d = localStorage.getItem(STORE_KEY);
+    if(d){
+      const p = JSON.parse(d);
+      if(p.dokWajib && !p.dokWajibMurni){
+        p.dokWajibMurni = [...p.dokWajib];
+        p.dokWajibPerubahan = [...p.dokWajib];
+        delete p.dokWajib;
+      }
+      return p;
+    }
+  }catch(e){}
+  return _defaultState();
+}
+
+// Simpan ke localStorage (cache lokal) DAN ke GAS (penyimpanan utama/server)
+function save(){
+  try{ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }catch(e){ showToast('Penyimpanan lokal penuh! Hapus beberapa dokumen.','err'); }
+  _saveStateToGAS();
+}
+
+let _saveTimer = null;
+function _saveStateToGAS(){
+  // Debounce 2 detik agar tidak spam API tiap keystroke
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(async () => {
+    try{
+      if(typeof getGasUrl !== 'function' || !isGasConfigured()) return;
+      await _gasPost({ action: 'saveState', state: S });
+    }catch(_){}
+  }, 2000);
+}
+
+// Muat state dari GAS saat login berhasil
+async function _loadStateFromGAS(){
+  try{
+    if(typeof getGasUrl !== 'function' || !isGasConfigured()) return;
+    showToast('🔄 Memuat data dari server…','info');
+    const r = await _gasGet({ action: 'getState' });
+    if(r && r.ok && r.state){
+      const gasState = r.state;
+      if(gasState.dokWajib && !gasState.dokWajibMurni){
+        gasState.dokWajibMurni = [...gasState.dokWajib];
+        gasState.dokWajibPerubahan = [...gasState.dokWajib];
+        delete gasState.dokWajib;
+      }
+      // GAS tidak menyimpan dataUrl (terlalu besar), ambil dari localStorage jika cocok
+      const localRaw = localStorage.getItem(STORE_KEY);
+      if(localRaw){
+        try{
+          const localState = JSON.parse(localRaw);
+          Object.keys(gasState.uploads || {}).forEach(id => {
+            const localUps = (localState.uploads || {})[id] || [];
+            (gasState.uploads[id] || []).forEach(u => {
+              const localU = localUps.find(lu => lu.dokIdx === u.dokIdx && lu.nama === u.nama);
+              if(localU && localU.dataUrl) u.dataUrl = localU.dataUrl;
+            });
+          });
+          // Merge dataUrl SOP dari local jika nama cocok
+          if(gasState.sop && !gasState.sop.dataUrl && localState.sop && localState.sop.dataUrl){
+            if(gasState.sop.nama === localState.sop.nama) gasState.sop.dataUrl = localState.sop.dataUrl;
+          }
+        }catch(_){}
+      }
+      S = gasState;
+      try{ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }catch(_){}
+      showToast('✅ Data berhasil dimuat dari server','success');
+      nav('dashboard');
+    } else {
+      showToast('ℹ️ Tidak ada data server, menggunakan data lokal','info');
+      nav('dashboard');
+    }
+  }catch(e){
+    console.warn('[NATAS] Gagal load dari GAS:', e.message);
+    showToast('⚠️ Tidak bisa terhubung ke server, menggunakan data lokal','warn');
+    nav('dashboard');
+  }
+}
 function genId(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
 
 function getUploads(id){ return S.uploads[id] || []; }
@@ -1141,11 +1210,14 @@ function showSopBanner(){
   const content = document.getElementById('sop-banner-content');
   const isImage = S.sop.tipe?.startsWith('image/');
   const isPdf = S.sop.tipe === 'application/pdf';
+  const hasDrive = !!S.sop.driveFileId;
+  const imgSrc = S.sop.dataUrl || (hasDrive ? 'https://drive.google.com/thumbnail?id='+S.sop.driveFileId+'&sz=w800' : null);
+  const previewSrc = S.sop.dataUrl || (hasDrive ? S.sop.previewUrl || ('https://drive.google.com/file/d/'+S.sop.driveFileId+'/preview') : null);
 
-  if(isImage){
-    content.innerHTML = `<img src="${S.sop.dataUrl}" alt="SOP Reviu RKA" style="max-width:100%;max-height:72vh;object-fit:contain;display:block;border-radius:0">`;
-  } else if(isPdf){
-    content.innerHTML = `<iframe src="${S.sop.dataUrl}" style="width:100%;height:68vh;border:none;display:block"></iframe>`;
+  if(isImage && imgSrc){
+    content.innerHTML = `<img src="${imgSrc}" alt="SOP Reviu RKA" style="max-width:100%;max-height:72vh;object-fit:contain;display:block;border-radius:0">`;
+  } else if(isPdf && previewSrc){
+    content.innerHTML = `<iframe src="${previewSrc}" style="width:100%;height:68vh;border:none;display:block"></iframe>`;
   } else {
     content.innerHTML = `<div style="text-align:center;padding:40px;color:#64748b">
       <i class="ti ti-file-certificate" style="font-size:56px;color:#d1fae5;display:block;margin-bottom:12px"></i>
@@ -1192,7 +1264,8 @@ function doLogin(){
     err.style.display = 'none';
     document.getElementById('loginPage').classList.add('hidden');
     document.getElementById('appContainer').style.display = 'flex';
-    nav('dashboard');
+    // Coba muat data dari GAS dulu, baru tampilkan dashboard
+    _loadStateFromGAS();
   } else {
     err.style.display = 'block';
     document.getElementById('loginPass').value = '';
@@ -2115,13 +2188,17 @@ function renderSOP(){
   }
   const isImage = S.sop.tipe?.startsWith('image/');
   const isPdf = S.sop.tipe==='application/pdf';
+  // Gunakan dataUrl lokal jika ada, fallback ke Google Drive
+  const hasDrive = !!S.sop.driveFileId;
+  const previewSrc = S.sop.dataUrl || (hasDrive ? S.sop.previewUrl || ('https://drive.google.com/file/d/'+S.sop.driveFileId+'/preview') : null);
+  const imgSrc = S.sop.dataUrl || (hasDrive ? 'https://drive.google.com/thumbnail?id='+S.sop.driveFileId+'&sz=w800' : null);
   const actions = `<div style="display:flex;gap:8px;justify-content:center;margin-top:14px">
-    <button class="btn btn-sm btn-cyan" onclick="window.open('${S.sop.dataUrl}','_blank')"><i class="ti ti-external-link"></i> Buka</button>
-    <button class="btn btn-sm btn-success" onclick="downloadSOP()"><i class="ti ti-download"></i> Download</button>
+    ${hasDrive ? `<a class="btn btn-sm btn-cyan" href="${S.sop.driveUrl || '#'}" target="_blank" rel="noopener"><i class="ti ti-brand-google-drive"></i> Buka di Drive</a>` : ''}
+    ${S.sop.dataUrl ? `<button class="btn btn-sm btn-success" onclick="downloadSOP()"><i class="ti ti-download"></i> Download</button>` : ''}
     <button class="btn btn-sm btn-danger" onclick="hapusSOP()"><i class="ti ti-trash"></i> Hapus</button>
-  </div><div style="font-size:11px;color:var(--text-muted);margin-top:10px">${escHtml(S.sop.nama)} · ${fmtDate(S.sop.tgl)}</div>`;
-  if(isImage) area.innerHTML = `<img src="${S.sop.dataUrl}" alt="SOP" style="max-width:100%;max-height:500px;border-radius:10px;box-shadow:var(--shadow-md)">${actions}`;
-  else if(isPdf) area.innerHTML = `<iframe src="${S.sop.dataUrl}" style="width:100%;height:520px;border:none;border-radius:10px"></iframe>${actions}`;
+  </div><div style="font-size:11px;color:var(--text-muted);margin-top:10px">${escHtml(S.sop.nama)} · ${fmtDate(S.sop.tgl)}${hasDrive?' · <span style="color:#10b981">✓ Tersimpan di Google Drive</span>':''}</div>`;
+  if(isImage && imgSrc) area.innerHTML = `<img src="${imgSrc}" alt="SOP" style="max-width:100%;max-height:500px;border-radius:10px;box-shadow:var(--shadow-md)">${actions}`;
+  else if(isPdf && previewSrc) area.innerHTML = `<iframe src="${previewSrc}" style="width:100%;height:520px;border:none;border-radius:10px"></iframe>${actions}`;
   else area.innerHTML = `<div class="sop-empty"><i class="ti ti-file" style="font-size:48px;color:#d1fae5"></i><p>${escHtml(S.sop.nama)}</p></div>${actions}`;
 }
 function uploadSOP(e){
@@ -2129,12 +2206,42 @@ function uploadSOP(e){
   if(!f) return;
   if(f.size > 15*1024*1024){ showToast('File melebihi 15 MB','err'); return; }
   const r = new FileReader();
-  r.onload = ev => {
-    S.sop = {nama:f.name, tipe:f.type, tgl:new Date().toISOString(), dataUrl:ev.target.result};
+  r.onload = async ev => {
+    const dataUrl = ev.target.result;
+    S.sop = {nama:f.name, tipe:f.type, tgl:new Date().toISOString(), dataUrl};
     addActivity(`SOP "${f.name}" diunggah`, 'upload');
     save();
     renderSOP();
-    showToast('SOP berhasil diunggah.','success');
+    showToast('SOP berhasil diunggah. Mengarsip ke Drive…','success');
+
+    // Upload ke Google Drive via GAS agar tersedia di semua browser
+    try{
+      if(typeof getGasUrl === 'function' && isGasConfigured()){
+        const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        const res = await _gasPost({
+          action: 'uploadFile',
+          opdId: 'SOP',
+          opdNama: 'SOP Reviu RKA',
+          tahun: new Date().getFullYear(),
+          jenisReviu: 'SOP',
+          dokIdx: 0,
+          dokNama: 'SOP Reviu RKA',
+          fileName: f.name,
+          mimeType: f.type,
+          ukuran: f.size,
+          base64Data: b64,
+          catatan: 'SOP Reviu RKA',
+          uploadedAt: new Date().toISOString(),
+        });
+        if(res && res.ok){
+          S.sop.driveFileId = res.fileId || '';
+          S.sop.driveUrl    = res.fileUrl || '';
+          S.sop.previewUrl  = res.previewUrl || '';
+          save();
+          showToast('✅ SOP tersimpan di Google Drive!','success');
+        }
+      }
+    }catch(_){}
   };
   r.readAsDataURL(f);
   e.target.value = '';
